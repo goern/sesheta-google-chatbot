@@ -30,18 +30,19 @@ from oauth2client.service_account import ServiceAccountCredentials
 from thoth.common import init_logging
 
 from chatbot.__version__ import __version__
+from chatbot.responses import create_card_response
 
 
 # Info Metric
-bot_info = Gauge(
-    "sesheta_info",  # what promethus ses
+sesj_info = Gauge(
+    "sesheta_bot_info",  # what promethus ses
     "Sesheta Google Hangouts Chat Bot information",  # what the human reads
     ["version"],  # what labels I use
 )
 bot_info.labels(__version__).inc()
 
 http_requests_total = Counter(
-    "http_requests_total", "Total number of HTTP POST requests received from Google Hangouts Chat.", []
+    "sesheta_http_requests_total", "Total number of HTTP POST requests received from Google Hangouts Chat.", ["method"]
 )
 
 init_logging()
@@ -69,15 +70,31 @@ async def metrics(req, resp):
     resp.text = generate_latest().decode("utf-8")
 
 
-@api.route("/bot")
+@api.route("/bot")  # FIXME this URL should contain a super secret string...
 async def bot(req, resp):
     """Handle all requests sent to this endpoint from Hangouts Chat."""
     if req.method != "post":
+        http_requests_total.labels("get").inc()
+
         resp.text = "Only POST allowed"
         return
 
+    @api.background.task
+    def send_async_response(response, space_name):
+        """Sends a response back to the Hangouts Chat room asynchronously.
+        Args:
+            response: the response payload
+            spaceName: The URL of the Hangouts Chat room
+        """
+        scopes = ["https://www.googleapis.com/auth/chat.bot"]
+        credentials = ServiceAccountCredentials.from_json_keyfile_name("/sesheta-chatbot.json", scopes)
+        http_auth = credentials.authorize(Http())
+
+        chat = build("chat", "v1", http=http_auth)
+        chat.spaces().messages().create(parent=space_name, body=response).execute()
+
     event = None
-    http_requests_total.inc()
+    http_requests_total.labels("post").inc()
 
     try:
         event = await req.media()
@@ -90,10 +107,16 @@ async def bot(req, resp):
         text = f'Thanks for adding me to "{event["space"]["displayName"]}"!'
     elif event["type"] == "MESSAGE":
         text = "You said: `%s`" % event["message"]["text"]
+    elif event_data["type"] == "CARD_CLICKED":
+        action_name = event_data["action"]["actionMethodName"]
+        parameters = event_data["action"]["parameters"]
+        _LOGGER.info(f"{action_name} with {parameters}")
     else:
         return
 
-    resp.media = {"text": text}
+    send_async_response(create_card_response(), event["space"]["name"])
+
+    resp.text = "OK"
 
 
 if __name__ == "__main__":
