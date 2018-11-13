@@ -34,7 +34,7 @@ from chatbot.responses import create_card_response
 
 
 # Info Metric
-sesj_info = Gauge(
+bot_info = Gauge(
     "sesheta_bot_info",  # what promethus ses
     "Sesheta Google Hangouts Chat Bot information",  # what the human reads
     ["version"],  # what labels I use
