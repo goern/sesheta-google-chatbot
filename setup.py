@@ -12,7 +12,7 @@ from shutil import rmtree
 from setuptools import find_packages, setup, Command
 
 # Package meta-data.
-NAME = "sesheta.chatbot"
+NAME = "chatbot"
 DESCRIPTION = "This is a Google Hangouts Chat Bot."
 URL = "https://github.com/goern/google-chatbot"
 EMAIL = "goern@redhat.com"
