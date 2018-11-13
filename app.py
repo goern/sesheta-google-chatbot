@@ -24,7 +24,7 @@ import json
 import responder
 import uvicorn
 
-from prometheus_client import Gauge, generate_latest, CollectorRegistry, CONTENT_TYPE_LATEST
+from prometheus_client import Gauge, Counter, generate_latest
 from oauth2client.service_account import ServiceAccountCredentials
 
 from thoth.common import init_logging
@@ -40,6 +40,9 @@ bot_info = Gauge(
 )
 bot_info.labels(__version__).inc()
 
+http_requests_total = Counter(
+    "http_requests_total", "Total number of HTTP POST requests received from Google Hangouts Chat.", []
+)
 
 init_logging()
 
@@ -74,6 +77,7 @@ async def bot(req, resp):
         return
 
     event = None
+    http_requests_total.inc()
 
     try:
         event = await req.media()
