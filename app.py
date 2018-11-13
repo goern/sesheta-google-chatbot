@@ -29,7 +29,8 @@ from oauth2client.service_account import ServiceAccountCredentials
 
 from thoth.common import init_logging
 
-from chatbot import __version__
+from chatbot.__version__ import __version__
+
 
 # Info Metric
 bot_info = Gauge(
