@@ -73,14 +73,23 @@ async def bot(req, resp):
         resp.text = "Only POST allowed"
         return
 
-    event_data = None
+    event = None
 
     try:
-        event_data = await req.media()
+        event = await req.media()
     except json.decoder.JSONDecodeError as excptn:
         _LOGGER.error(excptn)
 
-    resp.media = {"success": True}
+    _LOGGER.debug("received an event from hangouts: ", event)
+
+    if event["type"] == "ADDED_TO_SPACE" and event["space"]["type"] == "ROOM":
+        text = f'Thanks for adding me to "{event["space"]["displayName"]}"!'
+    elif event["type"] == "MESSAGE":
+        text = "You said: `%s`" % event["message"]["text"]
+    else:
+        return
+
+    resp.media = {"text": text}
 
 
 if __name__ == "__main__":
