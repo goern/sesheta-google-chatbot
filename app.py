@@ -101,22 +101,22 @@ async def bot(req, resp):
     except json.decoder.JSONDecodeError as excptn:
         _LOGGER.error(excptn)
 
-    _LOGGER.debug("received an event from hangouts: ", event)
+    _LOGGER.debug("received an event from hangouts: %r.", event)
 
     if event["type"] == "ADDED_TO_SPACE" and event["space"]["type"] == "ROOM":
         text = f'Thanks for adding me to "{event["space"]["displayName"]}"!'
     elif event["type"] == "MESSAGE":
         text = "You said: `%s`" % event["message"]["text"]
-    elif event_data["type"] == "CARD_CLICKED":
-        action_name = event_data["action"]["actionMethodName"]
-        parameters = event_data["action"]["parameters"]
+    elif event["type"] == "CARD_CLICKED":
+        action_name = event["action"]["actionMethodName"]
+        parameters = event["action"]["parameters"]
         _LOGGER.info(f"{action_name} with {parameters}")
     else:
         return
 
     send_async_response(create_card_response(), event["space"]["name"])
 
-    resp.text = "OK"
+    resp.media = {"text": text}
 
 
 if __name__ == "__main__":
