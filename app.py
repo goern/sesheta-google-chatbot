@@ -25,7 +25,6 @@ import responder
 import uvicorn
 
 from prometheus_client import Gauge, Counter, generate_latest
-from oauth2client.service_account import ServiceAccountCredentials
 
 from thoth.common import init_logging
 
@@ -79,20 +78,6 @@ async def bot(req, resp):
         resp.text = "Only POST allowed"
         return
 
-    @api.background.task
-    def send_async_response(response, space_name):
-        """Sends a response back to the Hangouts Chat room asynchronously.
-        Args:
-            response: the response payload
-            spaceName: The URL of the Hangouts Chat room
-        """
-        scopes = ["https://www.googleapis.com/auth/chat.bot"]
-        credentials = ServiceAccountCredentials.from_json_keyfile_name("/sesheta-chatbot.json", scopes)
-        http_auth = credentials.authorize(Http())
-
-        chat = build("chat", "v1", http=http_auth)
-        chat.spaces().messages().create(parent=space_name, body=response).execute()
-
     event = None
     http_requests_total.labels("post").inc()
 
@@ -114,9 +99,7 @@ async def bot(req, resp):
     else:
         return
 
-    send_async_response(create_card_response(), event["space"]["name"])
-
-    resp.media = {"text": text}
+    resp.media = create_card_response(text)
 
 
 if __name__ == "__main__":
