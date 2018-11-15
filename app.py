@@ -31,8 +31,6 @@ import google
 
 from httplib2 import Http
 
-from oauth2client.service_account import ServiceAccountCredentials
-from apiclient.discovery import build
 from google.cloud import pubsub_v1
 from prometheus_client import Gauge, Counter, generate_latest
 
@@ -71,13 +69,20 @@ sesheta_events_total = Counter(
 
 def callback(message):
     """Process the message we received from the Pub/Sub subscription."""
+    from oauth2client.service_account import ServiceAccountCredentials
+    from apiclient.discovery import build
+
     event = json.loads(message.data.decode("utf8"))
     _LOGGER.debug(event)
 
-    if event["message"]["space"]["type"].upper() == "DM":
-        sesheta_events_total.labels("dm").inc()
-    elif event["message"]["space"]["type"].upper() == "ROOM":
-        sesheta_events_total.labels("room").inc()
+    try:
+        if event["message"]["space"]["type"].upper() == "DM":
+            sesheta_events_total.labels("dm").inc()
+        elif event["message"]["space"]["type"].upper() == "ROOM":
+            sesheta_events_total.labels("room").inc()
+    except KeyError as excptn:
+        _LOGGER.error(excptn)
+        return
 
     answer = f"Hey {event['message']['sender']['displayName']}, how are you?"
 
