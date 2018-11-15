@@ -17,20 +17,44 @@
 
 """This is a Google Hangouts Chat Bot. No Magic, Just Karma"""
 
+
+import signal
 import os
 import logging
 import json
+import uuid
+import threading
 
 import responder
 import uvicorn
+import google
 
+from httplib2 import Http
+
+from oauth2client.service_account import ServiceAccountCredentials
+from apiclient.discovery import build
+from google.cloud import pubsub_v1
 from prometheus_client import Gauge, Counter, generate_latest
 
 from thoth.common import init_logging
 
 from chatbot.__version__ import __version__
-from chatbot.responses import create_card_response
 
+
+init_logging()
+
+_LOGGER = logging.getLogger("thoth.sesheta")
+_DEBUG = os.getenv("GOOGLE_CHATBOT_DEBUG", False)
+
+TOPIC_NAME = "projects/sesheta-chatbot/topics/chat-events"
+SUBSCRIPTION_NAME = f"projects/sesheta-chatbot/subscriptions/sesheta-{uuid.uuid4().hex}"
+
+subscriber = pubsub_v1.SubscriberClient()
+
+api = responder.API(title="Sesheta Google Chatbot", version=__version__)
+api.add_route("/", static=True)
+
+api.debug = _DEBUG
 
 # Info Metric
 bot_info = Gauge(
@@ -40,19 +64,55 @@ bot_info = Gauge(
 )
 bot_info.labels(__version__).inc()
 
-http_requests_total = Counter(
-    "sesheta_http_requests_total", "Total number of HTTP POST requests received from Google Hangouts Chat.", ["method"]
+sesheta_events_total = Counter(
+    "sesheta_events_total", "Total number of events received from Google Hangouts Chat.", ["space_type"]
 )
 
-init_logging()
 
-_LOGGER = logging.getLogger("thoth.sesheta")
-_DEBUG = os.getenv("GOOGLE_CHATBOT_DEBUG", False)
+def callback(message):
+    """Process the message we received from the Pub/Sub subscription."""
+    event = json.loads(message.data.decode("utf8"))
+    _LOGGER.debug(event)
 
-api = responder.API(title="Sesheta Google Chatbot", version=__version__)
-api.add_route("/", static=True)
+    if event["message"]["space"]["type"].upper() == "DM":
+        sesheta_events_total.labels("dm").inc()
+    elif event["message"]["space"]["type"].upper() == "ROOM":
+        sesheta_events_total.labels("room").inc()
 
-api.debug = _DEBUG
+    answer = f"Hey {event['message']['sender']['displayName']}, how are you?"
+
+    scopes = "https://www.googleapis.com/auth/chat.bot"
+    credentials = ServiceAccountCredentials.from_json_keyfile_name("sesheta-chatbot-968e13a86991.json", scopes)
+    chat = build("chat", "v1", http=credentials.authorize(Http()))
+    resp = chat.spaces().messages().create(parent=event["space"]["name"], body={"text": answer}).execute()
+    _LOGGER.debug(resp)
+
+    message.ack()
+
+
+class GooglePubSubSubscriber(threading.Thread):
+    """A Google PubSub subscriber thread."""
+
+    def run(self):
+        try:
+            subscriber.create_subscription(name=SUBSCRIPTION_NAME, topic=TOPIC_NAME)
+        except google.api_core.exceptions.AlreadyExists as excptn:
+            _LOGGER.error(excptn)
+            subscriber.delete_subscription(SUBSCRIPTION_NAME)
+
+        future = subscriber.subscribe(SUBSCRIPTION_NAME, callback)
+
+        self.alive = True
+        try:
+            while self.alive:
+                future.result()
+
+        finally:
+            future.close()
+
+    def stop(self):
+        self.alive = False
+        self.join()
 
 
 @api.route(before_request=True)
@@ -69,44 +129,17 @@ async def metrics(req, resp):
     resp.text = generate_latest().decode("utf-8")
 
 
-@api.route("/bot")  # FIXME this URL should contain a super secret string...
-async def bot(req, resp):
-    """Handle all requests sent to this endpoint from Hangouts Chat."""
-    if req.method != "post":
-        http_requests_total.labels("get").inc()
-
-        resp.text = "Only POST allowed"
-        return
-
-    event = None
-    http_requests_total.labels("post").inc()
-
-    try:
-        event = await req.media()
-    except json.decoder.JSONDecodeError as excptn:
-        _LOGGER.error(excptn)
-
-    _LOGGER.debug("received an event from hangouts: %r.", event)
-
-    if event["type"] == "ADDED_TO_SPACE" and event["space"]["type"] == "ROOM":
-        text = f'Thanks for adding me to "{event["space"]["displayName"]}"!'
-    elif event["type"] == "MESSAGE":
-        text = "You said: `%s`" % event["message"]["text"]
-    elif event["type"] == "CARD_CLICKED":
-        action_name = event["action"]["actionMethodName"]
-        parameters = event["action"]["parameters"]
-        _LOGGER.info(f"{action_name} with {parameters}")
-    else:
-        return
-
-    resp.media = create_card_response(text)
-
-
 if __name__ == "__main__":
     logging.getLogger("thoth").setLevel(logging.DEBUG if _DEBUG else logging.INFO)
+    logging.getLogger("googleapicliet.discovery_cache").setLevel(logging.ERROR)
 
     _LOGGER.debug("Debug mode is on")
-
     _LOGGER.info(f"Hi, I am Sesheta, I will track your karma, and I'm running v{__version__}")
 
+    # TODO handle SIGTERM, SIGKILL, SIGINT and delete the subscription on exit
+    pubsub_receiver = GooglePubSubSubscriber()
+    pubsub_receiver.start()
+
     api.run(address="0.0.0.0", port=8080, debug=_DEBUG)
+
+    pubsub_receiver.stop()
