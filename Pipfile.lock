@@ -214,7 +214,6 @@
                 "sha256:df4b1c6dacb9f000863cef2e38d6454313b08edaa600e9dad93878ed997e2501",
                 "sha256:f2827bc041a9fd2046a4b11597ca0d7d2974fb17fe67b67f84995732761d61af"
             ],
-            "markers": "extra == 'grpc'",
             "version": "==1.16.1rc1"
         },
         "h11": {
