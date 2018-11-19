@@ -106,3 +106,4 @@ venv.bak/
 .vscode/
 
 *.retry
+etc/service_account.json

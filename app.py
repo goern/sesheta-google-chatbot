@@ -76,10 +76,10 @@ def append_to_sheet(event):
     SCOPES = "https://www.googleapis.com/auth/spreadsheets"
 
     # The ID and range of a sample spreadsheet.
-    SESHETA_SPREADSHEET_ID = "15_g9x0Xx3LQctukoJCnwrwMRk0fqe-vzxfpfrYP1z94"
+    SESHETA_SPREADSHEET_ID = "15_g9x0Xx3LQctukoJCnwrwMRk0fqe-vzxfpfrYP1z94"  # FIXME this should come from ENV
     RANGE_NAME = "current input"
 
-    credentials = ServiceAccountCredentials.from_json_keyfile_name("sesheta-chatbot-968e13a86991.json", SCOPES)
+    credentials = ServiceAccountCredentials.from_json_keyfile_name("etc/service_account.json", SCOPES)
     http_auth = credentials.authorize(Http())
 
     sheets = build("sheets", "v4", http=http_auth)
