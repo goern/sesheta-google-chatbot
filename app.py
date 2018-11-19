@@ -29,9 +29,13 @@ import responder
 import uvicorn
 import google
 
+from datetime import datetime
+
 from httplib2 import Http
 
 from google.cloud import pubsub_v1
+from googleapiclient.discovery import build
+from oauth2client.service_account import ServiceAccountCredentials
 from prometheus_client import Gauge, Counter, generate_latest
 
 from thoth.common import init_logging
@@ -67,24 +71,70 @@ sesheta_events_total = Counter(
 )
 
 
+def append_to_sheet(event):
+    """Appends a new row to the Sesheta Google Sheet."""
+    SCOPES = "https://www.googleapis.com/auth/spreadsheets"
+
+    # The ID and range of a sample spreadsheet.
+    SESHETA_SPREADSHEET_ID = "15_g9x0Xx3LQctukoJCnwrwMRk0fqe-vzxfpfrYP1z94"
+    RANGE_NAME = "current input"
+
+    credentials = ServiceAccountCredentials.from_json_keyfile_name("sesheta-chatbot-968e13a86991.json", SCOPES)
+    http_auth = credentials.authorize(Http())
+
+    sheets = build("sheets", "v4", http=http_auth)
+    sheet = sheets.spreadsheets()
+
+    result = sheet.values().get(spreadsheetId=SESHETA_SPREADSHEET_ID, range=RANGE_NAME).execute()
+    values = result.get("values", [])
+
+    _from = event["user"]["displayName"]
+    try:
+        _message = event["message"]["text"]
+    except KeyError as excptn:
+        _LOGGER.error(excptn)
+        _LOGGER.debug(event)
+        _message = None
+    _type = event["type"]
+    _space = event["space"]["name"]
+
+    values = [[datetime.utcnow().isoformat(), _from, _message, _type, _space]]
+    body = {"values": values}
+    result = (
+        sheet.values()
+        .append(spreadsheetId=SESHETA_SPREADSHEET_ID, range=RANGE_NAME, valueInputOption="RAW", body=body)
+        .execute()
+    )
+    print("{0} cells appended.".format(result.get("updates").get("updatedCells")))
+
+
 def callback(message):
     """Process the message we received from the Pub/Sub subscription."""
-    from oauth2client.service_account import ServiceAccountCredentials
-    from apiclient.discovery import build
-
     event = json.loads(message.data.decode("utf8"))
     _LOGGER.debug(event)
 
     try:
-        if event["message"]["space"]["type"].upper() == "DM":
+        if event["type"] == "REMOVED_FROM_SPACE":
+            _LOGGER.info("Bot removed from  %s" % event["space"]["name"])
+        elif event["type"] == "ADDED_TO_SPACE" and event["space"]["type"] == "ROOM":
+            resp = {"text": ("Thanks for adding me to {}!".format(event["space"]["name"]))}
+        elif event["type"] == "ADDED_TO_SPACE" and event["space"]["type"] == "DM":
+            resp = {"text": ("Thanks for having me in this one on one chat, {}!".format(event["user"]["displayName"]))}
+        elif event["message"]["space"]["type"].upper() == "DM":
             sesheta_events_total.labels("dm").inc()
         elif event["message"]["space"]["type"].upper() == "ROOM":
             sesheta_events_total.labels("room").inc()
+        elif event["type"] == "CARD_CLICKED":
+            action_name = event["action"]["actionMethodName"]
+            parameters = event["action"]["parameters"]
+            _LOGGER.info("%r: %r", action_name, parameters)
     except KeyError as excptn:
         _LOGGER.error(excptn)
         return
 
-    answer = f"Hey {event['message']['sender']['displayName']}, how are you?"
+    append_to_sheet(event)
+
+    answer = f"Hey {event['message']['sender']['displayName']}, thanks for the info, I have recorded that fact!"
 
     scopes = "https://www.googleapis.com/auth/chat.bot"
     credentials = ServiceAccountCredentials.from_json_keyfile_name("sesheta-chatbot-968e13a86991.json", scopes)
@@ -136,7 +186,7 @@ async def metrics(req, resp):
 
 if __name__ == "__main__":
     logging.getLogger("thoth").setLevel(logging.DEBUG if _DEBUG else logging.INFO)
-    logging.getLogger("googleapicliet.discovery_cache").setLevel(logging.ERROR)
+    logging.getLogger("googleapiclient.discovery_cache").setLevel(logging.ERROR)
 
     _LOGGER.debug("Debug mode is on")
     _LOGGER.info(f"Hi, I am Sesheta, I will track your karma, and I'm running v{__version__}")

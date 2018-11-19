@@ -11,7 +11,7 @@ requests = "*"
 thoth-common = "*"
 prometheus-client = "*"
 google-api-python-client = "*"
-google-cloud-pubsub = "*"
+google-cloud-pubsub = "==0.37.2"
 
 [dev-packages]
 black = "*"
