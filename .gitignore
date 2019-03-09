@@ -107,3 +107,4 @@ venv.bak/
 
 *.retry
 etc/service_account.json
+conf/

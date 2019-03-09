@@ -11,15 +11,13 @@ requests = "*"
 thoth-common = "*"
 prometheus-client = "*"
 google-api-python-client = "*"
-google-cloud-pubsub = "==0.37.2"
+google-cloud-pubsub = "*"
+kafka-python = "*"
 
 [dev-packages]
-black = "*"
-pylint = "*"
-pytest = "*"
 
 [requires]
 python_version = "3.6"
 
 [pipenv]
-allow_prereleases = true
+allow_prereleases = false

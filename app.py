@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # google-chatbot
-# Copyright(C) 2018 Christoph Görn
+# Copyright(C) 2018,2019 Christoph Görn
 #
 # This program is free software: you can redistribute it and / or modify
 # it under the terms of the GNU General Public License as published by
@@ -25,9 +25,12 @@ import json
 import uuid
 import threading
 
+import requests
 import responder
 import uvicorn
 import google
+import kafka
+
 
 from datetime import datetime
 
@@ -37,6 +40,7 @@ from google.cloud import pubsub_v1
 from googleapiclient.discovery import build
 from oauth2client.service_account import ServiceAccountCredentials
 from prometheus_client import Gauge, Counter, generate_latest
+from kafka import KafkaProducer
 
 from thoth.common import init_logging
 
@@ -47,9 +51,13 @@ init_logging()
 
 _LOGGER = logging.getLogger("thoth.sesheta")
 _DEBUG = os.getenv("GOOGLE_CHATBOT_DEBUG", False)
+_KAFAK_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 
+LUIS_APP_ID = os.getenv("LUIS_APP_ID")
+LUIS_APP_KEY = os.getenv("LUIS_APP_KEY")
 TOPIC_NAME = "projects/sesheta-chatbot/topics/chat-events"
 SUBSCRIPTION_NAME = f"projects/sesheta-chatbot/subscriptions/sesheta-{uuid.uuid4().hex}"
+GOOGLE_CHATBOT_TOPIC_NAME = "cyborg_regidores_hangout"
 
 subscriber = pubsub_v1.SubscriberClient()
 
@@ -57,6 +65,7 @@ api = responder.API(title="Sesheta Google Chatbot", version=__version__)
 api.add_route("/", static=True)
 
 api.debug = _DEBUG
+
 
 # Info Metric
 bot_info = Gauge(
@@ -71,13 +80,15 @@ sesheta_events_total = Counter(
 )
 
 
-def append_to_sheet(event):
+def append_to_sheet(event: dict):
     """Appends a new row to the Sesheta Google Sheet."""
+    _LOGGER.debug("adding chat event to our google sheet...")
+
     SCOPES = "https://www.googleapis.com/auth/spreadsheets"
 
     # The ID and range of a sample spreadsheet.
     SESHETA_SPREADSHEET_ID = "15_g9x0Xx3LQctukoJCnwrwMRk0fqe-vzxfpfrYP1z94"  # FIXME this should come from ENV
-    RANGE_NAME = "current input"
+    RANGE_NAME = "current_input"
 
     credentials = ServiceAccountCredentials.from_json_keyfile_name("etc/service_account.json", SCOPES)
     http_auth = credentials.authorize(Http())
@@ -97,8 +108,14 @@ def append_to_sheet(event):
         _message = None
     _type = event["type"]
     _space = event["space"]["name"]
+    _space_name = ""
 
-    values = [[datetime.utcnow().isoformat(), _from, _message, _type, _space]]
+    try:
+        _space_name = event["space"]["displayName"]
+    except KeyError:
+        pass
+
+    values = [[datetime.utcnow().isoformat(), _from, _message, _space_name, _type, _space]]
     body = {"values": values}
     result = (
         sheet.values()
@@ -108,8 +125,90 @@ def append_to_sheet(event):
     print("{0} cells appended.".format(result.get("updates").get("updatedCells")))
 
 
+def send_to_kafka(event: dict):
+    """Send the received event to Kafka."""
+    _LOGGER.debug("sending chat event to kafka topic...")
+
+    try:
+        producer = KafkaProducer(
+            bootstrap_servers=_KAFAK_BOOTSTRAP_SERVERS,
+            acks=1,  # Wait for leader to write the record to its local log only.
+            compression_type="gzip",
+            value_serializer=lambda v: json.dumps(v).encode("utf-8"),
+            security_protocol="SSL",
+            ssl_check_hostname=False,
+            ssl_cafile="conf/ca.pem",
+        )
+    except kafka.errors.NoBrokersAvailable as excptn:
+        _LOGGER.debug("while trying to reconnect KafkaProducer: we failed...")
+        _LOGGER.error(excptn)
+        return
+
+    try:
+        producer.send(GOOGLE_CHATBOT_TOPIC_NAME, event)
+    except AttributeError as excptn:
+        _LOGGER.debug(excptn)
+    except (kafka.errors.NotLeaderForPartitionError, kafka.errors.KafkaTimeoutError) as excptn:
+        _LOGGER.error(excptn)
+        producer.close()
+        producer = None
+
+    return
+
+
+def generate_answer(event: dict):
+    """Generate an answer based on the event."""
+    _LOGGER.debug(f"generating an answer based on the event... {event}")
+
+    if event["type"] == "MESSAGE":
+        message = event["message"]["text"]
+        sender = event["message"]["sender"]["name"].split("/")[1]
+        space = event["message"]["space"]["name"].split("/")[1]
+
+        headers = {"Ocp-Apim-Subscription-Key": LUIS_APP_KEY}
+        params = {"q": message, "timezoneOffset": "0", "verbose": "true", "spellCheck": "false", "staging": "false"}
+
+        answer_text = "Puh, right now I just can give you some generic response, sorry."
+
+        try:
+            r = requests.get(
+                f"https://westus.api.cognitive.microsoft.com/luis/v2.0/apps/{LUIS_APP_ID}",
+                headers=headers,
+                params=params,
+            )
+
+            topScoringIntent = r.json()["topScoringIntent"]["intent"]
+            topScoringIntentScore = r.json()["topScoringIntent"]["score"]
+            entities = r.json()["entities"]
+
+            if topScoringIntent == "help":
+                answer_text = "Hi, I am Sesheta, a bot run by the AI CoE, please feel free to join our chat at https://chat.google.com/room/AAAARndRdLM"
+            if topScoringIntent == "takeNoteForNewsletter":
+                if topScoringIntentScore < 0.8:
+                    answer_text = "I am unsure what you want to say, could you please rephrase?"
+                    return
+
+                answer_text = "this seems like an interesting information, thanks"
+
+                if len(entities) > 0:
+                    for entity in entities:
+                        if entity["type"] == "builtin.url":
+                            answer_text = (
+                                f"I have taken down a note, and a human will have a look at {entity['entity']}"
+                            )
+            if topScoringIntent == "weather":
+                answer_text = "Sorry, I don't know about the weather"
+
+        except Exception as e:
+            _LOGGER.error("[Errno {0}] {1}".format(e.errno, e.strerror))
+
+        return answer_text
+
+
 def callback(message):
     """Process the message we received from the Pub/Sub subscription."""
+    answer = None
+    thread_id = None
     event = json.loads(message.data.decode("utf8"))
     _LOGGER.debug(event)
 
@@ -117,13 +216,17 @@ def callback(message):
         if event["type"] == "REMOVED_FROM_SPACE":
             _LOGGER.info("Bot removed from  %s" % event["space"]["name"])
         elif event["type"] == "ADDED_TO_SPACE" and event["space"]["type"] == "ROOM":
-            resp = {"text": ("Thanks for adding me to {}!".format(event["space"]["name"]))}
+            answer = f"Thanks for adding me to '{event['space']['displayName']}'!"
         elif event["type"] == "ADDED_TO_SPACE" and event["space"]["type"] == "DM":
-            resp = {"text": ("Thanks for having me in this one on one chat, {}!".format(event["user"]["displayName"]))}
+            answer = f"Thanks for having me in this one on one chat, {event['user']['displayName']}!"
         elif event["message"]["space"]["type"].upper() == "DM":
             sesheta_events_total.labels("dm").inc()
+
+            thread_id = event["message"]["thread"]
         elif event["message"]["space"]["type"].upper() == "ROOM":
             sesheta_events_total.labels("room").inc()
+
+            thread_id = event["message"]["thread"]
         elif event["type"] == "CARD_CLICKED":
             action_name = event["action"]["actionMethodName"]
             parameters = event["action"]["parameters"]
@@ -132,17 +235,42 @@ def callback(message):
         _LOGGER.error(excptn)
         return
 
-    append_to_sheet(event)
+    # ok, no further answer required
+    if event["type"] == "REMOVED_FROM_SPACE":
+        return
 
-    answer = f"Hey {event['message']['sender']['displayName']}, thanks for the info, I have recorded that fact!"
+    if answer is None:
+        answer = generate_answer(event)
 
-    scopes = "https://www.googleapis.com/auth/chat.bot"
-    credentials = ServiceAccountCredentials.from_json_keyfile_name("sesheta-chatbot-968e13a86991.json", scopes)
-    chat = build("chat", "v1", http=credentials.authorize(Http()))
-    resp = chat.spaces().messages().create(parent=event["space"]["name"], body={"text": answer}).execute()
-    _LOGGER.debug(resp)
+    if answer is not None:
+        response = {"text": answer}
 
-    message.ack()
+        if thread_id is not None:
+            response["thread"] = thread_id
+
+        try:
+            scopes = "https://www.googleapis.com/auth/chat.bot"
+            credentials = ServiceAccountCredentials.from_json_keyfile_name("etc/service_account.json", scopes)
+            chat = build("chat", "v1", http=credentials.authorize(Http()))
+            resp = chat.spaces().messages().create(parent=event["space"]["name"], body=response).execute()
+            _LOGGER.debug(resp)
+        except googleapiclient.errors.HttpError as excptn:
+            _LOGGER.error(excptn)
+            message.ack()
+            return
+
+        except KeyError as excptn:
+            _LOGGER.error(excptn)
+            return
+
+    try:
+        append_to_sheet(event)
+
+        send_to_kafka(event)
+
+        message.ack()
+    except Exception as generalException:
+        _LOGGER.error(generalException)
 
 
 class GooglePubSubSubscriber(threading.Thread):
